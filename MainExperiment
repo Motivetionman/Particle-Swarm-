@@ -1,0 +1,155 @@
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * Main class to set up and run the time-series prediction experiment.
+ * It handles the 10-Fold Cross-Validation and testing different MLP architectures
+ * for 5-day and 10-day lookahead predictions.
+ */
+public class MainExperiment {
+
+    // กำหนดจำนวน folds สำหรับ Cross-Validation
+    private static final int NUM_FOLDS = 10;
+    
+    // กำหนดไฟล์ข้อมูล
+    private static final String DATA_FILE_PATH = "C:/Users/MSI-1/Downloads/AirQualityUCI.csv";
+    
+    // กำหนดโครงสร้าง MLP ที่ต้องการทดสอบ: {Hidden Layer 1 Nodes, Hidden Layer 2 Nodes, ...}
+    private static final int[][] MLP_ARCHITECTURES = {
+        {7},    // 1 Hidden Layer, 5 Nodes
+        {10,10},   // 1 Hidden Layer, 10 Nodes
+        {15, 5}, // 2 Hidden Layers, 5 and 5 Nodes
+        {5,5, 5}, // 2 Hidden Layers, 10 and 5 Nodes
+        {20}
+    };
+
+    public static void main(String[] args) {
+        
+        AirQualityData dataProcessor = new AirQualityData();
+
+        // ------------------ 1. กำหนด Lookahead Time (5 วัน และ 10 วัน) ------------------
+        // 5 วัน = 5 * 24 = 120 ชั่วโมง
+        // 10 วัน = 10 * 24 = 240 ชั่วโมง
+        int[] lookaheads = {120, 240}; 
+
+        for (int k : lookaheads) {
+            System.out.println("=====================================================");
+            System.out.println("--- EXPERIMENT: Prediction " + (k/24) + " Days Lookahead (k=" + k + "h) ---");
+            System.out.println("=====================================================");
+            
+            // โหลดและเตรียมข้อมูลทั้งหมดสำหรับ Lookahead นี้
+            double[][] fullDataset = dataProcessor.loadAndPreprocess(DATA_FILE_PATH, k);
+            if (fullDataset.length == 0) {
+                System.err.println("Skipping this experiment due to empty dataset.");
+                continue;
+            }
+            
+            int numSamples = fullDataset.length;
+            int foldSize = numSamples / NUM_FOLDS;
+            int numInputNodes = dataProcessor.getNumInputFeatures(); // 8 attributes
+            int numOutputNodes = 1; // Benzene Concentration
+
+            // ------------------ 2. ทดสอบ MLP Architecture แต่ละแบบ ------------------
+            for (int[] arch : MLP_ARCHITECTURES) {
+                System.out.println("\n-----------------------------------------------------");
+                System.out.println("MLP Architecture: Input=" + numInputNodes + " -> Hidden=" + Arrays.toString(arch) + " -> Output=" + numOutputNodes);
+                
+                double totalMAESum = 0.0;
+
+                // ------------------ 3. 10-Fold Cross-Validation Loop ------------------
+                for (int fold = 0; fold < NUM_FOLDS; fold++) {
+                    System.out.println("\n-- Starting Fold " + (fold + 1) + " of " + NUM_FOLDS + " --");
+                    
+                    // a. แบ่งข้อมูลเป็น Training และ Testing set
+                    // สำหรับ Time Series Cross-Validation, เราจะใช้ Fold 'f' เป็น Test Set
+                    // และ Folds ก่อนหน้า (0 ถึง f-1) และ Fold หลังหน้า (f+1 ถึง 9) เป็น Training Set
+                    double[][] trainingSet = getTrainingSet(fullDataset, fold, foldSize, numSamples);
+                    double[][] testingSet = getTestingSet(fullDataset, fold, foldSize, numSamples);
+
+                    // b. Initialize MLP และ PSO
+                    MultilayerPerceptron mlp = new MultilayerPerceptron(numInputNodes, arch, numOutputNodes);
+                    ParticleSwarmOptimizer pso = new ParticleSwarmOptimizer(mlp, trainingSet, dataProcessor);
+                    
+                    // c. Train โดยใช้ PSO
+                    System.out.println("  Training MLP (Total Weights: " + mlp.getTotalWeights() + ")...");
+                    double[] bestWeights = pso.train();
+                    
+                    // d. Evaluate on Test Set
+                    double foldMAE = evaluateOnTestSet(mlp, bestWeights, testingSet, dataProcessor);
+                    totalMAESum += foldMAE;
+                    
+                    System.out.printf("  Fold %d Test MAE: %.4f%n", (fold + 1), foldMAE);
+                }
+                
+                // e. รายงานผล Average MAE
+                double avgMAE = totalMAESum / NUM_FOLDS;
+                System.out.println("-----------------------------------------------------");
+                System.out.printf(">>> FINAL AVERAGE MAE for Architecture %s: %.4f%n", Arrays.toString(arch), avgMAE);
+                System.out.println("-----------------------------------------------------");
+            }
+        }
+    }
+
+    /**
+     * สร้าง Training Set สำหรับ Fold ปัจจุบัน (ใช้ข้อมูลทั้งหมดที่ไม่ใช่ Test Fold)
+     */
+    private static double[][] getTrainingSet(double[][] fullDataset, int fold, int foldSize, int numSamples) {
+        int startTest = fold * foldSize;
+        int endTest = (fold == NUM_FOLDS - 1) ? numSamples : startTest + foldSize;
+        
+        List<double[]> trainList = new java.util.ArrayList<>();
+        
+        // ข้อมูลก่อนหน้า Test Fold
+        for (int i = 0; i < startTest; i++) {
+            trainList.add(fullDataset[i]);
+        }
+        
+        // ข้อมูลหลัง Test Fold
+        for (int i = endTest; i < numSamples; i++) {
+            trainList.add(fullDataset[i]);
+        }
+        
+        return trainList.toArray(new double[0][0]);
+    }
+
+    /**
+     * สร้าง Testing Set สำหรับ Fold ปัจจุบัน
+     */
+    private static double[][] getTestingSet(double[][] fullDataset, int fold, int foldSize, int numSamples) {
+        int startTest = fold * foldSize;
+        int endTest = (fold == NUM_FOLDS - 1) ? numSamples : startTest + foldSize;
+        int testSize = endTest - startTest;
+        
+        double[][] testSet = new double[testSize][];
+        System.arraycopy(fullDataset, startTest, testSet, 0, testSize);
+        
+        return testSet;
+    }
+    
+    /**
+     * ประเมินประสิทธิภาพของ Network บน Test Set ด้วย MAE
+     */
+    private static double evaluateOnTestSet(MultilayerPerceptron mlp, double[] bestWeights, double[][] testingSet, AirQualityData dataProcessor) {
+        double totalAbsoluteError = 0.0;
+        int numSamples = testingSet.length;
+        int inputSize = mlp.getNumInputs();
+
+        if (numSamples == 0) return 0.0;
+
+        for (double[] sample : testingSet) {
+            double[] input = Arrays.copyOf(sample, inputSize);
+            double actualOutputNormalized = sample[inputSize];
+            
+            // ทำนายด้วยน้ำหนักที่ดีที่สุด
+            double predictedOutputNormalized = mlp.predict(input, bestWeights);
+            
+            // De-normalize ค่าทั้งสอง
+            double actualOutput = dataProcessor.denormalizeValue(actualOutputNormalized);
+            double predictedOutput = dataProcessor.denormalizeValue(predictedOutputNormalized);
+            
+            totalAbsoluteError += Math.abs(actualOutput - predictedOutput);
+        }
+
+        return totalAbsoluteError / numSamples;
+    }
+}

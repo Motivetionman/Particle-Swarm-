@@ -1,0 +1,236 @@
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Class for loading, preprocessing, and preparing the AirQualityUCI dataset 
+ * for time-series prediction using Multilayer Perceptron and PSO.
+ */
+public class AirQualityData {
+
+    // กำหนดดัชนีคอลัมน์ที่เกี่ยวข้องในไฟล์ CSV (0-indexed)
+    // โดยใช้ชื่อคอลัมน์จากข้อมูลที่ได้จากการสำรวจ (PT08.S1(CO) คือ index 3, C6H6(GT) คือ index 5, ฯลฯ)
+    private static final int[] ALL_RELEVANT_INDICES = {3, 5, 6, 8, 10, 11, 12, 13, 14};
+    private static final int[] INPUT_INDICES = {3, 6, 8, 10, 11, 12, 13, 14};
+    private static final int OUTPUT_INDEX = 5; // C6H6(GT)
+
+    private static final double MISSING_VALUE_CODE = -200.0;
+    
+    // ตัวแปรสำหรับเก็บค่า Min/Max เพื่อใช้ในการ Normalization และ De-normalization
+    private double[] minValues;
+    private double[] maxValues;
+
+    /**
+     * ดำเนินการโหลด, ทำความสะอาด, และสร้างชุดข้อมูลอนุกรมเวลา
+     *
+     * @param filePath เส้นทางไฟล์ CSV
+     * @param lookaheadHours จำนวนชั่วโมงล่วงหน้าที่ต้องการทำนาย (e.g., 120 for 5 days)
+     * @return ชุดข้อมูลที่พร้อมใช้งาน (Input_X, Output_Y) โดยที่ Output_Y เป็นคอลัมน์สุดท้าย
+     */
+    public double[][] loadAndPreprocess(String filePath, int lookaheadHours) {
+        // 1. โหลดข้อมูลดิบ
+        double[][] rawData = readCSV(filePath);
+        if (rawData == null || rawData.length == 0) {
+            System.err.println("Error: Could not load data or data is empty.");
+            return new double[0][0];
+        }
+
+        // 2. จัดการค่าที่ขาดหาย (-200) ด้วย Mean Imputation
+        double[][] imputedData = imputeMissingValues(rawData);
+
+        // 3. Normalization (Min-Max Scaling)
+        double[][] normalizedData = normalizeData(imputedData);
+        
+        // 4. สร้างชุดข้อมูล Lagged Time-Series
+        return createLaggedDataset(normalizedData, lookaheadHours);
+    }
+    
+    /**
+     * อ่านไฟล์ CSV และแปลงเฉพาะคอลัมน์ที่เป็นตัวเลข
+     */
+    private double[][] readCSV(String filePath) {
+        List<double[]> dataList = new ArrayList<>();
+        // กำหนดจำนวนคอลัมน์ทั้งหมด (Date, Time, CO(GT) ... AH) คือ 15 คอลัมน์
+        final int NUM_COLUMNS = 15; 
+
+        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
+            String line = br.readLine(); // อ่าน Header
+            if (line == null) return new double[0][0];
+
+            while ((line = br.readLine()) != null) {
+                // ข้อมูลในไฟล์นี้ใช้ comma (,) เป็นตัวคั่น
+                // แต่เนื่องจากค่าตัวเลขอาจมี , อยู่ภายใน (กรณี Excel format) 
+                // และมีช่องว่างในข้อมูลบางตัว จึงใช้ regex เพื่อให้การแยกมีความยืดหยุ่นมากขึ้น
+                String[] values = line.split(",\\s*"); 
+                
+                if (values.length < NUM_COLUMNS) continue; 
+
+                double[] row = new double[NUM_COLUMNS];
+                try {
+                    // เราจะข้ามคอลัมน์ Date (0) และ Time (1) และเริ่มอ่านค่าตัวเลขตั้งแต่คอลัมน์ 2 (CO(GT))
+                    for (int i = 2; i < NUM_COLUMNS; i++) {
+                        // แทนที่ค่าว่างด้วย -200 ก่อนการ Imputation
+                        String val = values[i].trim();
+                        row[i] = val.isEmpty() ? MISSING_VALUE_CODE : Double.parseDouble(val);
+                    }
+                    dataList.add(row);
+                } catch (NumberFormatException e) {
+                    // ข้ามแถวที่มีปัญหาในการแปลงค่าตัวเลข
+                    continue; 
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Error reading file: " + e.getMessage());
+            return null;
+        }
+
+        return dataList.toArray(new double[0][0]);
+    }
+
+    /**
+     * จัดการค่าที่ขาดหาย (-200) โดยการแทนที่ด้วยค่าเฉลี่ย (Mean Imputation)
+     */
+    private double[][] imputeMissingValues(double[][] rawData) {
+        int numRows = rawData.length;
+        int numCols = rawData[0].length;
+        double[][] imputedData = new double[numRows][numCols];
+        
+        // 1. คำนวณค่าเฉลี่ยของแต่ละคอลัมน์ (ไม่รวมค่า -200)
+        double[] means = new double[numCols];
+        for (int col : ALL_RELEVANT_INDICES) {
+            double sum = 0;
+            int count = 0;
+            for (int i = 0; i < numRows; i++) {
+                if (rawData[i][col] != MISSING_VALUE_CODE) {
+                    sum += rawData[i][col];
+                    count++;
+                }
+            }
+            // หากไม่มีข้อมูลที่ถูกต้องเลย (ไม่ควรเกิดขึ้น) ให้ใช้ 0
+            means[col] = (count > 0) ? sum / count : 0.0; 
+        }
+
+        // 2. ทำการ Imputation
+        for (int i = 0; i < numRows; i++) {
+            // คัดลอกข้อมูลทั้งหมด
+            System.arraycopy(rawData[i], 0, imputedData[i], 0, numCols);
+            
+            // แทนที่เฉพาะคอลัมน์ที่เกี่ยวข้อง
+            for (int col : ALL_RELEVANT_INDICES) {
+                if (imputedData[i][col] == MISSING_VALUE_CODE) {
+                    imputedData[i][col] = means[col];
+                }
+            }
+        }
+        return imputedData;
+    }
+
+    /**
+     * ทำการ Normalization ข้อมูลโดยใช้ Min-Max Scaling (ปรับให้อยู่ในช่วง [0, 1])
+     */
+    private double[][] normalizeData(double[][] imputedData) {
+        int numRows = imputedData.length;
+        int numCols = imputedData[0].length;
+        double[][] normalizedData = new double[numRows][numCols];
+
+        // 1. หาค่า Min/Max สำหรับทุกคอลัมน์ที่เกี่ยวข้อง
+        minValues = new double[numCols];
+        maxValues = new double[numCols];
+        
+        for (int col : ALL_RELEVANT_INDICES) {
+            double min = Double.MAX_VALUE;
+            double max = Double.MIN_VALUE;
+            
+            for (int i = 0; i < numRows; i++) {
+                if (imputedData[i][col] < min) min = imputedData[i][col];
+                if (imputedData[i][col] > max) max = imputedData[i][col];
+            }
+            minValues[col] = min;
+            maxValues[col] = max;
+        }
+
+        // 2. ประยุกต์ใช้ Min-Max Scaling
+        for (int i = 0; i < numRows; i++) {
+            System.arraycopy(imputedData[i], 0, normalizedData[i], 0, numCols);
+            
+            for (int col : ALL_RELEVANT_INDICES) {
+                double min = minValues[col];
+                double max = maxValues[col];
+                double range = max - min;
+                
+                if (range > 0) {
+                    // X' = (X - Min) / (Max - Min)
+                    normalizedData[i][col] = (imputedData[i][col] - min) / range;
+                } else {
+                    // หาก Max == Min, ข้อมูลทั้งหมดเป็นค่าเดียวกัน ให้กำหนดเป็น 0 หรือ 1 (เราใช้ 0)
+                    normalizedData[i][col] = 0.0; 
+                }
+            }
+        }
+        return normalizedData;
+    }
+    
+    /**
+     * สร้างชุดข้อมูลอนุกรมเวลา: X_t (Input) และ Y_t+k (Output)
+     */
+    private double[][] createLaggedDataset(double[][] normalizedData, int lookaheadHours) {
+        List<double[]> laggedData = new ArrayList<>();
+        int maxIndex = normalizedData.length - 1 - lookaheadHours;
+        int numInputFeatures = INPUT_INDICES.length;
+        
+        // เราจะข้าม lookaheadHours แถวสุดท้าย เนื่องจากไม่มีค่า Y_t+k
+        for (int t = 0; t <= maxIndex; t++) {
+            
+            // 1. ดึง Input (X_t)
+            double[] input_X = new double[numInputFeatures];
+            for (int i = 0; i < numInputFeatures; i++) {
+                int colIndex = INPUT_INDICES[i];
+                input_X[i] = normalizedData[t][colIndex];
+            }
+            
+            // 2. ดึง Output (Y_t+k)
+            double output_Y = normalizedData[t + lookaheadHours][OUTPUT_INDEX];
+            
+            // 3. รวม X และ Y เข้าเป็นแถวเดียว (X_1, X_2, ..., X_8, Y)
+            double[] sample = new double[numInputFeatures + 1];
+            System.arraycopy(input_X, 0, sample, 0, numInputFeatures);
+            sample[numInputFeatures] = output_Y;
+            laggedData.add(sample);
+        }
+        
+        return laggedData.toArray(new double[0][0]);
+    }
+
+    /**
+     * แปลงค่ากลับจาก Normalization เพื่อวัด Error จริง (MAE)
+     * * @param normalizedValue ค่าที่ถูก Normalization แล้ว
+     * @return ค่าจริงที่ De-normalized
+     */
+    public double denormalizeValue(double normalizedValue) {
+        // ใช้ค่า Min/Max ของคอลัมน์ Output (C6H6(GT) คือ index 5)
+        if (minValues == null || maxValues == null) {
+            throw new IllegalStateException("Normalization data (min/max) is not available. Call loadAndPreprocess first.");
+        }
+        
+        double min = minValues[OUTPUT_INDEX];
+        double max = maxValues[OUTPUT_INDEX];
+        double range = max - min;
+        
+        if (range <= 0) {
+             // ถ้า Max == Min จะคืนค่า Min กลับไป
+            return min; 
+        }
+        
+        // X = X' * (Max - Min) + Min
+        return normalizedValue * range + min;
+    }
+    
+    /**
+     * เมธอดสำหรับเข้าถึงจำนวนคุณลักษณะของ Input
+     */
+    public int getNumInputFeatures() {
+        return INPUT_INDICES.length;
+    }
+}

@@ -1,0 +1,167 @@
+import java.util.Arrays;
+
+/**
+ * Class representing a Multilayer Perceptron (MLP) for regression.
+ * The weights of the network are managed as a single flat array, 
+ * which is the format required by the Particle Swarm Optimization (PSO) algorithm.
+ */
+public class MultilayerPerceptron {
+
+    private int numInputs;          // จำนวน Input Nodes (8 attributes)
+    private int[] hiddenNodes;      // อาร์เรย์ของจำนวน Nodes ในแต่ละ Hidden Layer (เช่น {5} หรือ {10, 5})
+    private int numOutputs;         // จำนวน Output Nodes (1 - Benzene concentration)
+    
+    // Store the calculated number of weights/biases for each layer, 
+    // used to map the flat array of weights back to the network structure.
+    private int[] layerWeightCounts;
+    private int totalWeights;
+
+    /**
+     * Constructor สำหรับการสร้าง MLP
+     *
+     * @param nInputs จำนวน Input Nodes
+     * @param hNodes อาร์เรย์ของจำนวน Nodes ใน Hidden Layers
+     * @param nOutputs จำนวน Output Nodes
+     */
+    public MultilayerPerceptron(int nInputs, int[] hNodes, int nOutputs) {
+        this.numInputs = nInputs;
+        this.hiddenNodes = hNodes;
+        this.numOutputs = nOutputs;
+        
+        // คำนวณจำนวนน้ำหนักทั้งหมดและกำหนดการแบ่งน้ำหนักในแต่ละชั้น
+        calculateWeightMapping();
+    }
+
+    /**
+     * คำนวณจำนวนน้ำหนักและ Bias ทั้งหมดที่จำเป็นสำหรับ MLP Structure นี้
+     * และกำหนดขอบเขตของน้ำหนักสำหรับแต่ละชั้น
+     */
+    private void calculateWeightMapping() {
+        // layerWeightCounts[i] จะเก็บจำนวนน้ำหนักทั้งหมด (W + Bias) ที่เชื่อมต่อเข้าสู่ Layer i+1
+        layerWeightCounts = new int[hiddenNodes.length + 1];
+        totalWeights = 0;
+        
+        int prevNodes = numInputs;
+        
+        // 1. คำนวณน้ำหนักสำหรับ Hidden Layers
+        for (int i = 0; i < hiddenNodes.length; i++) {
+            int currentNodes = hiddenNodes[i];
+            // จำนวนน้ำหนัก: (จำนวนโหนดก่อนหน้า + 1 สำหรับ Bias) * จำนวนโหนดปัจจุบัน
+            int count = (prevNodes + 1) * currentNodes;
+            layerWeightCounts[i] = count;
+            totalWeights += count;
+            prevNodes = currentNodes;
+        }
+        
+        // 2. คำนวณน้ำหนักสำหรับ Output Layer
+        // จำนวนน้ำหนัก: (จำนวนโหนด Hidden สุดท้าย + 1 สำหรับ Bias) * จำนวน Output Nodes
+        int outputWeightCount = (prevNodes + 1) * numOutputs;
+        layerWeightCounts[hiddenNodes.length] = outputWeightCount;
+        totalWeights += outputWeightCount;
+    }
+
+    /**
+     * Function: Activation function (Sigmoid)
+     * ใช้สำหรับ Hidden Layers เพื่อให้เกิดความเป็น Nonlinearity
+     */
+    private double sigmoid(double x) {
+        return 1.0 / (1.0 + Math.exp(-x));
+    }
+
+    /**
+     * Function: Linear function (Identity)
+     * ใช้สำหรับ Output Layer ในงาน Regression เมื่อค่าเป้าหมายถูก Normalization แล้ว
+     */
+    private double linear(double x) {
+        return x;
+    }
+
+    /**
+     * ดำเนินการ Forward Propagation เพื่อทำนายค่า Output
+     *
+     * @param input ชุดข้อมูล Input (8 attributes)
+     * @param currentWeights ชุดน้ำหนักแบบแบนที่ดีที่สุดที่ได้จาก PSO
+     * @return ค่าทำนาย Benzene concentration ที่ถูก Normalization แล้ว
+     */
+    public double predict(double[] input, double[] currentWeights) {
+        if (input.length != numInputs) {
+            throw new IllegalArgumentException("Input dimension mismatch.");
+        }
+        if (currentWeights.length != totalWeights) {
+            throw new IllegalArgumentException("Weights dimension mismatch. Expected: " + totalWeights + ", Got: " + currentWeights.length);
+        }
+
+        // ตัวแปรสำหรับเก็บค่า Activation ของโหนดใน Layer ปัจจุบัน
+        double[] currentLayerOutput = Arrays.copyOf(input, numInputs);
+        int weightIndex = 0;
+
+        // ------------------ 1. Hidden Layers ------------------
+        for (int i = 0; i < hiddenNodes.length; i++) {
+            int prevNodes = (i == 0) ? numInputs : hiddenNodes[i - 1];
+            int currentNodes = hiddenNodes[i];
+            
+            // Output ของ Hidden Layer ถัดไป
+            double[] nextLayerOutput = new double[currentNodes];
+            
+            for (int j = 0; j < currentNodes; j++) {
+                // Calculation: Sum = (W_0 * 1) + (W_1 * X_1) + ...
+                double sum = 0.0;
+                
+                // Bias (W_0 * 1) - น้ำหนักแรกในกลุ่มของโหนดนี้
+                double bias = currentWeights[weightIndex++];
+                sum += bias; 
+                
+                // Weights * Inputs
+                for (int k = 0; k < prevNodes; k++) {
+                    double weight = currentWeights[weightIndex++];
+                    sum += weight * currentLayerOutput[k];
+                }
+                
+                // Apply Activation Function (Sigmoid)
+                nextLayerOutput[j] = sigmoid(sum);
+            }
+            
+            // อัพเดท Output สำหรับ Hidden Layer ถัดไป
+            currentLayerOutput = nextLayerOutput;
+        }
+
+        // ------------------ 2. Output Layer ------------------
+        // Output Layer มี 1 โหนด
+        double[] outputLayer = new double[numOutputs];
+        int prevNodes = (hiddenNodes.length > 0) ? hiddenNodes[hiddenNodes.length - 1] : numInputs;
+        
+        for (int j = 0; j < numOutputs; j++) {
+            double sum = 0.0;
+            
+            // Bias
+            double bias = currentWeights[weightIndex++];
+            sum += bias; 
+            
+            // Weights * Inputs (จาก Hidden Layer สุดท้าย)
+            for (int k = 0; k < prevNodes; k++) {
+                double weight = currentWeights[weightIndex++];
+                sum += weight * currentLayerOutput[k];
+            }
+            
+            // Apply Activation Function (Linear)
+            outputLayer[j] = linear(sum); 
+        }
+
+        // เนื่องจากมี Output Node เดียว
+        return outputLayer[0];
+    }
+    
+    /**
+     * @return จำนวน Input Nodes
+     */
+    public int getNumInputs() {
+        return numInputs;
+    }
+
+    /**
+     * @return จำนวนน้ำหนักและ Bias ทั้งหมดที่ PSO ต้องหาค่าที่เหมาะสม
+     */
+    public int getTotalWeights() {
+        return totalWeights;
+    }
+}

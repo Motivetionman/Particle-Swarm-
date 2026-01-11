@@ -1,0 +1,159 @@
+import java.util.Arrays;
+import java.util.Random;
+
+/**
+ * Class implementing the Particle Swarm Optimization (PSO) algorithm
+ * to train the weights of a Multilayer Perceptron (MLP).
+ */
+public class ParticleSwarmOptimizer {
+
+    private MultilayerPerceptron mlp;
+    private double[][] trainingData; 
+    private AirQualityData dataProcessor; 
+
+    // PSO Hyperparameters
+    private final int numParticles = 30;
+    private final double w = 0.729;         
+    private final double c1 = 1.49445;      
+    private final double c2 = 1.49445;      
+    private final int maxIterations = 100; 
+    private final double maxVelocity = 0.5; 
+
+    private Random random = new Random();
+    private Particle[] particles;
+    private double[] globalBestPosition; 
+    private double globalBestFitness = Double.MAX_VALUE; 
+
+    /**
+     * Constructor
+     */
+    public ParticleSwarmOptimizer(MultilayerPerceptron mlp, double[][] data, AirQualityData dataProcessor) {
+        this.mlp = mlp;
+        this.trainingData = data;
+        this.dataProcessor = dataProcessor;
+        this.particles = new Particle[numParticles];
+    }
+
+    /**
+     * Class ภายในสำหรับแทน Particle แต่ละตัวในฝูง
+     */
+    private class Particle {
+        double[] position;          
+        double[] velocity;          
+        double[] personalBest;      
+        double personalBestFitness; 
+
+        Particle(int dimension) {
+            this.position = new double[dimension];
+            this.velocity = new double[dimension];
+            this.personalBest = new double[dimension];
+            this.personalBestFitness = Double.MAX_VALUE;
+
+            // สุ่มเริ่มต้นตำแหน่ง (น้ำหนัก) ให้อยู่ในช่วง [-1, 1]
+            for (int i = 0; i < dimension; i++) {
+                this.position[i] = (random.nextDouble() * 2) - 1; // [-1, 1]
+                this.velocity[i] = 0.0;
+            }
+            
+            // ตั้งค่า pBest เริ่มต้นเป็นตำแหน่งเริ่มต้น
+            System.arraycopy(this.position, 0, this.personalBest, 0, dimension);
+        }
+    }
+
+    /**
+     * ฟังก์ชันความฟิต: Mean Absolute Error (MAE)
+     */
+    private double calculateMAE(double[] weights) {
+        double totalAbsoluteError = 0;
+        int numSamples = trainingData.length;
+        int inputSize = mlp.getNumInputs();
+
+        for (double[] sample : trainingData) {
+            double[] input = Arrays.copyOf(sample, inputSize);
+            
+            double actualOutputNormalized = sample[inputSize]; 
+            double predictedOutputNormalized = mlp.predict(input, weights);
+            
+            // De-normalize ค่าก่อนคำนวณ Error
+            double actualOutput = dataProcessor.denormalizeValue(actualOutputNormalized);
+            double predictedOutput = dataProcessor.denormalizeValue(predictedOutputNormalized);
+            
+            totalAbsoluteError += Math.abs(actualOutput - predictedOutput);
+        }
+        return totalAbsoluteError / numSamples;
+    }
+
+    /**
+     * ดำเนินการ Train MLP โดยใช้อัลกอริทึม PSO
+     */
+    public double[] train() {
+        int dimension = mlp.getTotalWeights(); 
+        
+        // 1. Initialisation
+        globalBestPosition = new double[dimension];
+        
+        for (int i = 0; i < numParticles; i++) {
+            particles[i] = new Particle(dimension);
+            
+            // ประเมิน Fitness ของตำแหน่งเริ่มต้น
+            double initialFitness = calculateMAE(particles[i].position);
+            particles[i].personalBestFitness = initialFitness;
+            
+            // อัพเดท gBest
+            if (initialFitness < globalBestFitness) {
+                globalBestFitness = initialFitness;
+                System.arraycopy(particles[i].position, 0, globalBestPosition, 0, dimension);
+            }
+        }
+
+        // 2. Optimization Loop
+        for (int iter = 0; iter < maxIterations; iter++) {
+            for (Particle p : particles) { // <-- บรรทัดนี้ (หรือใกล้เคียง) คือจุดเริ่มต้นของการวนซ้ำ
+                
+                // 3. Update Velocity and Position
+                for (int i = 0; i < dimension; i++) {
+                    double r1 = random.nextDouble();
+                    double r2 = random.nextDouble();
+
+                    // Component 1: Inertia
+                    double inertia = w * p.velocity[i];
+                    
+                    // Component 2: Cognitive (Attraction to pBest)
+                    double cognitive = c1 * r1 * (p.personalBest[i] - p.position[i]);
+                    
+                    // Component 3: Social (Attraction to gBest)
+                    double social = c2 * r2 * (globalBestPosition[i] - p.position[i]);
+                    
+                    // Update Velocity
+                    p.velocity[i] = inertia + cognitive + social;
+                    
+                    // Limit Velocity (Clamping)
+                    if (p.velocity[i] > maxVelocity) p.velocity[i] = maxVelocity;
+                    if (p.velocity[i] < -maxVelocity) p.velocity[i] = -maxVelocity;
+
+                    // Update Position (Weights)
+                    p.position[i] += p.velocity[i];
+                }
+                
+                // 4. Evaluate Fitness (MAE)
+                double currentFitness = calculateMAE(p.position); // <-- แก้ไข: ใช้ p.position
+
+                // 5. Update pBest (Personal Best)
+                if (currentFitness < p.personalBestFitness) { // <-- แก้ไข: ใช้ p.personalBestFitness
+                    p.personalBestFitness = currentFitness;
+                    System.arraycopy(p.position, 0, p.personalBest, 0, dimension);
+                    
+                    // 6. Update gBest (Global Best)
+                    if (currentFitness < globalBestFitness) {
+                        globalBestFitness = currentFitness;
+                        System.arraycopy(p.position, 0, globalBestPosition, 0, dimension);
+                        // Optional: System.out.printf("Iteration %d: New gBest MAE = %.4f%n", iter, globalBestFitness);
+                    }
+                }
+            }
+        }
+        
+        System.out.printf("Training complete. Best MAE found: %.4f%n", globalBestFitness);
+        return globalBestPosition;
+    }
+}
